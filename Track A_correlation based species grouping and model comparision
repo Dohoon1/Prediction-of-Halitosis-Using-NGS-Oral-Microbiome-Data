@@ -1,0 +1,911 @@
+import pandas as pd
+import re
+import networkx as nx
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+file_path = "PCR_NGS_Data.xlsx"
+try:
+    df = pd.read_excel(file_path, skiprows=6)
+except FileNotFoundError:
+    print(f"Error: '{file_path}'")
+
+print(f"Data Size: {df.shape}")
+
+ngs_cols = [col for col in df.columns if col.startswith("__")]
+
+ngs_groups = {}
+for col in ngs_cols:
+    base_name = re.sub(r'\.\d+$', '', col)
+    ngs_groups.setdefault(base_name, []).append(col)
+
+all_cols_to_remove = set()
+
+for base_name, cols in ngs_groups.items():
+    new_col_name = f"NGS{base_name}"
+    df[new_col_name] = df[cols].sum(axis=1)
+
+    for c in cols:
+        all_cols_to_remove.add(c)
+
+df.drop(columns=list(all_cols_to_remove), inplace=True)
+
+pcr_species_list = [
+    "Aggregatibacter actinomycetemcomitans",
+    "Prevotella intermedia",
+    "Prevotella nigrescens",
+    "Lactobacillus casei",
+    "Fusobacterium nucleatum",
+    "Streptococcus mutans",
+    "Streptococcus sobrinus",
+    "Treponema denticola",
+    "Porphyromonas gingivalis",
+    "Tannerella forsythia",
+    "Eikenella corrodens",
+    "Parvimonas micra",
+    "Campylobacter rectus",
+    "Eubacterium nodatum",
+    "Fusobacterium alocis",
+    "Porphyromonas endodontalis"
+]
+
+ngs_cols = [c for c in df.columns if c.startswith("NGS__")]
+
+for sp in pcr_species_list:
+    matching_ngs_cols = [c for c in ngs_cols if sp in c]
+
+    new_col_name = f"NGS____{sp}"
+
+    if matching_ngs_cols:
+        df[new_col_name] = df[matching_ngs_cols].sum(axis=1)
+    else:
+        df[new_col_name] = 0
+
+for sp in pcr_species_list:
+    if sp in df.columns:
+        df.rename(columns={sp: f"PCR_{sp}"}, inplace=True)
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+all_species_cols = [c for c in df.columns if c.startswith("Halitosis") or c.startswith("PCR_") or c.startswith("NGS____")]
+df = df[all_species_cols]
+
+df_0 = df[df["Halitosis"] == 0] # Non-halitosis
+df_1 = df[df["Halitosis"] == 1] # Halitosis
+
+print(f"\nNon-halitosis (Halitosis=0): {len(df_0)}")
+print(f"Halitosis (Halitosis=1): {len(df_1)}")
+
+ngs_cols_for_corr = [c for c in df_0.columns if c.startswith("NGS____")]
+
+# corr_matrix
+corr_matrix_ngs_0 = df_0[ngs_cols_for_corr].corr(method='pearson')
+corr_matrix_ngs_1 = df_1[ngs_cols_for_corr].corr(method='pearson')
+
+
+# ----------------------------------------------------------
+# Correlation Map
+# ----------------------------------------------------------
+import re
+
+def shorten(full_name: str) -> str:
+
+    s = re.sub(r'^NGS_+', '', full_name)
+    s = re.sub(r'[\[\]]', '', s).strip()
+
+    parts = s.split()
+    if len(parts) >= 2:
+        genus_abbr = parts[0][0].upper() + '.'
+        rest = " ".join(p.capitalize() for p in parts[1:])
+        return f"{genus_abbr} {rest}"
+    elif parts:               
+        return parts[0].capitalize()
+    else:
+        return full_name      
+
+# halitosis
+abbrev_map = {col: shorten(col) for col in corr_matrix_ngs_1.columns}
+corr_abbrev = corr_matrix_ngs_1.rename(index=abbrev_map, columns=abbrev_map)
+
+
+cmap = sns.diverging_palette(
+    240,   # negative 
+     10,   # positive
+    s=99, l=45,           # saturation / lightness
+    as_cmap=True)
+
+plt.figure(figsize=(11,9))
+ax = sns.heatmap(
+    corr_abbrev,
+    cmap=cmap,
+    vmin=-0.2, vmax=1, center=0.0,     
+    linewidths=.5, linecolor='white',
+    square=True,
+    annot=True, fmt='.2f',
+    annot_kws={'size':10, 'color':'black'},
+    cbar_kws={'label':'', 'shrink':0.8,
+              'ticks':[-0.2,0,0.2,0.4,0.6,0.8,1]}
+)
+
+plt.xticks(rotation=45, ha='right', fontsize=10)
+plt.yticks(rotation=0, fontsize=10)
+plt.title('NGS vs NGS Correlation (Halitosis)', fontsize=14, pad=14)
+plt.tight_layout()
+plt.show()
+
+# non halitosis
+abbrev_map = {col: shorten(col) for col in corr_matrix_ngs_0.columns}
+corr_abbrev = corr_matrix_ngs_0.rename(index=abbrev_map, columns=abbrev_map)
+
+cmap = sns.diverging_palette(
+    240,   # negative 
+     10,   # positive 
+    s=99, l=45,           # saturation / lightness 
+    as_cmap=True)
+
+plt.figure(figsize=(11,9))
+ax = sns.heatmap(
+    corr_abbrev,
+    cmap=cmap,
+    vmin=-0.2, vmax=1, center=0.0,     # -1 → 파랑, 0 → 흰색, 1 → 빨강
+    linewidths=.5, linecolor='white',
+    square=True,
+    annot=True, fmt='.2f',
+    annot_kws={'size':10, 'color':'black'},
+    cbar_kws={'label':'', 'shrink':0.8,
+              'ticks':[-0.2,0,0.2,0.4,0.6,0.8,1]}
+)
+
+plt.xticks(rotation=45, ha='right', fontsize=10)
+plt.yticks(rotation=0, fontsize=10)
+plt.title('NGS vs NGS Correlation (Non-halitosis)', fontsize=14, pad=14)
+plt.tight_layout()
+plt.show()
+
+import pandas as pd
+import re
+import networkx as nx
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve
+from sklearn.preprocessing import StandardScaler
+from scipy.stats import norm # For DeLong's test p-value
+import time
+
+def abbreviate_feature_name(long_name):
+    # (Previous abbreviate_feature_name function code here)
+    processed_name = str(long_name)
+    prefixes = ["NGS____", "PCR_"]
+    for prefix in prefixes:
+        if processed_name.startswith(prefix):
+            processed_name = processed_name[len(prefix):]
+            break
+    processed_name = processed_name.replace("_", " ")
+    parts = [part for part in processed_name.split(' ') if part]
+    if len(parts) >= 2:
+        genus_part = parts[0]
+        rest_part = " ".join(parts[1:])
+        if genus_part:
+            genus_abbr = genus_part[0].upper() + "."
+            return f"{genus_abbr} {rest_part}"
+        else:
+            return " ".join(parts)
+    elif len(parts) == 1:
+         return parts[0]
+    else:
+         return long_name
+
+def find_correlation_groups(corr_matrix, threshold):
+
+    G = nx.Graph()
+    nodes = corr_matrix.columns.tolist()
+    G.add_nodes_from(nodes)
+
+    for i in range(len(nodes)):
+        for j in range(i + 1, len(nodes)):
+            node1 = nodes[i]
+            node2 = nodes[j]
+            if node1 in corr_matrix.index and node2 in corr_matrix.columns:
+                 correlation = corr_matrix.loc[node1, node2]
+                 # NaN 
+                 if pd.notna(correlation) and abs(correlation) >= threshold:
+                     G.add_edge(node1, node2, weight=correlation)
+
+    connected_components = list(nx.connected_components(G))
+
+    meaningful_groups = [group for group in connected_components if len(group) >= 2]
+
+    return meaningful_groups
+
+def bootstrap_auc_ci(y_true, y_pred_proba, n_bootstraps=10000, alpha=0.05, random_state=42):
+    """Calculates the 95% CI for AUROC using bootstrapping."""
+    y_true = np.array(y_true)
+    y_pred_proba = np.array(y_pred_proba)
+    rng = np.random.RandomState(random_state)
+    bootstrapped_aucs = []
+
+    if len(np.unique(y_true)) < 2:
+         print("Warning: Only one class present in sample. Cannot calculate AUC.")
+         return np.nan, np.nan # Or handle as appropriate
+
+    for i in range(n_bootstraps):
+        # Bootstrap by sampling with replacement on indices
+        indices = rng.randint(0, len(y_pred_proba), len(y_pred_proba))
+        if len(np.unique(y_true[indices])) < 2:
+            # Avoid cases where bootstrap sample has only one class
+            continue
+        try:
+            auc = roc_auc_score(y_true[indices], y_pred_proba[indices])
+            bootstrapped_aucs.append(auc)
+        except ValueError: # Handle potential errors during AUC calculation
+             # print(f"Skipping bootstrap iteration {i+1} due to ValueError (likely only one class in sample)")
+             continue
+
+
+    if not bootstrapped_aucs: # If all bootstrap samples failed
+         print("Warning: Could not calculate any valid AUCs during bootstrapping.")
+         return np.nan, np.nan
+
+    lower_bound = np.percentile(bootstrapped_aucs, (alpha / 2) * 100)
+    upper_bound = np.percentile(bootstrapped_aucs, (1 - alpha / 2) * 100)
+    return lower_bound, upper_bound
+
+# 4. DeLong's Test for Comparing Two AUCs (Implementation based on common patterns)
+# Reference: DeLong et al. (1988) Comparing the Areas under Two or More Correlated Receiver Operating Characteristic Curves: A Nonparametric Approach
+def delong_test(y_true, y_scores1, y_scores2):
+    """
+    Computes the p-value for DeLong's test comparing two correlated ROC curves.
+    Args:
+        y_true: True binary labels (0 or 1).
+        y_scores1: Predicted probabilities for model 1.
+        y_scores2: Predicted probabilities for model 2.
+    Returns:
+        p_value: The two-sided p-value. Returns NaN if inputs are invalid.
+    """
+    y_true = np.asarray(y_true)
+    y_scores1 = np.asarray(y_scores1)
+    y_scores2 = np.asarray(y_scores2)
+
+    # Basic input validation
+    if len(y_true) != len(y_scores1) or len(y_true) != len(y_scores2):
+        print("Error: Length mismatch in DeLong test inputs.")
+        return np.nan
+    if len(np.unique(y_true)) != 2:
+        print("Error: DeLong test requires binary labels (exactly 2 unique values).")
+        return np.nan
+    if np.array_equal(y_scores1, y_scores2):
+         return 1.0 # AUCs are identical
+
+    try:
+        auc1 = roc_auc_score(y_true, y_scores1)
+        auc2 = roc_auc_score(y_true, y_scores2)
+    except ValueError:
+        print("Error calculating initial AUCs for DeLong test.")
+        return np.nan
+
+
+    n1 = np.sum(y_true == 1)
+    n0 = np.sum(y_true == 0)
+    if n1 == 0 or n0 == 0:
+        print("Error: DeLong test requires both classes to be present.")
+        return np.nan
+
+    # Structural components V_10(y_i) and V_01(y_j)
+    # Get scores for positive and negative classes
+    scores1_pos = y_scores1[y_true == 1]
+    scores1_neg = y_scores1[y_true == 0]
+    scores2_pos = y_scores2[y_true == 1]
+    scores2_neg = y_scores2[y_true == 0]
+
+    # Calculate V10 and V01 for each model
+    v10_1 = np.zeros(n1)
+    v01_1 = np.zeros(n0)
+    v10_2 = np.zeros(n1)
+    v01_2 = np.zeros(n0)
+
+    # This is the core comparison loop
+    for i in range(n1):
+        # Compare positive sample i with all negative samples
+        psi_1 = np.mean((scores1_pos[i] > scores1_neg) + 0.5 * (scores1_pos[i] == scores1_neg))
+        psi_2 = np.mean((scores2_pos[i] > scores2_neg) + 0.5 * (scores2_pos[i] == scores2_neg))
+        v10_1[i] = psi_1
+        v10_2[i] = psi_2
+
+    for j in range(n0):
+        # Compare negative sample j with all positive samples
+        psi_1 = np.mean((scores1_neg[j] < scores1_pos) + 0.5 * (scores1_neg[j] == scores1_pos))
+        psi_2 = np.mean((scores2_neg[j] < scores2_pos) + 0.5 * (scores2_neg[j] == scores2_pos))
+        v01_1[j] = psi_1
+        v01_2[j] = psi_2
+
+
+    # Covariance estimation
+    s10_1 = np.cov(v10_1, v10_2) # Covariance matrix for V10 components
+    s01_1 = np.cov(v01_1, v01_2) # Covariance matrix for V01 components
+
+    # Variance of the AUC difference: var(AUC1 - AUC2)
+    # Formula: var(V10_1 - V10_2)/n1 + var(V01_1 - V01_2)/n0
+    # var(A-B) = var(A) + var(B) - 2*cov(A,B)
+    var_diff = (s10_1[0, 0] + s10_1[1, 1] - 2 * s10_1[0, 1]) / n1 + \
+               (s01_1[0, 0] + s01_1[1, 1] - 2 * s01_1[0, 1]) / n0
+
+    if var_diff <= 0: # Avoid division by zero or negative variance
+        print("Warning: Non-positive variance calculated in DeLong test. Cannot compute Z-score.")
+        return np.nan # Variance should be positive
+
+    # Z-score
+    z_score = (auc1 - auc2) / np.sqrt(var_diff)
+
+    # Two-sided p-value from standard normal distribution
+    p_value = 2 * (1 - norm.cdf(abs(z_score)))
+
+    return p_value
+
+def create_group_dataframes(original_df, groups, group_prefix):
+
+    group_dataframes = {}
+    if not groups:
+        print("No group")
+        return group_dataframes
+
+    for i, group_nodes in enumerate(groups):
+        group_name = f"{group_prefix}_{i+1}"
+        columns_to_select = list(group_nodes) + ['Halitosis']
+
+        existing_cols = [col for col in columns_to_select if col in original_df.columns]
+        if len(existing_cols) < len(columns_to_select):
+             missing_cols = set(columns_to_select) - set(existing_cols)
+             if 'Halitosis' not in existing_cols:
+                 continue # 이 그룹은 건너뜀
+
+        group_df = original_df[existing_cols].copy()
+
+        bacteria_cols_in_group = [col for col in existing_cols if col != 'Halitosis']
+        if not bacteria_cols_in_group:
+            continue
+
+        group_dataframes[group_name] = group_df
+        print(f"'{group_name}'. Size: {group_df.shape}, Columns: {group_df.columns.tolist()}")
+
+    return group_dataframes
+
+
+CORRELATION_THRESHOLD = 0.5999
+
+# Non-halitosis group
+print("\n--- Non-halitosis (Halitosis=0) group ---")
+groups_0 = find_correlation_groups(corr_matrix_ngs_0, CORRELATION_THRESHOLD)
+group_dfs_0 = create_group_dataframes(df, groups_0, "Non-Halitosis_NGS_Group") 
+
+# Halitosis group
+print("\n--- Halitosis (Halitosis=1) group ---")
+groups_1 = find_correlation_groups(corr_matrix_ngs_1, CORRELATION_THRESHOLD)
+group_dfs_1 = create_group_dataframes(df, groups_1, "Halitosis_NGS_Group") 
+
+print("Non-halitosis group:")
+if group_dfs_0:
+    for name, group_df in group_dfs_0.items():
+        print(f"- {name}: {group_df.shape} ")
+else:
+    print("No group")
+
+print("\nHalitosis group:")
+if group_dfs_1:
+    for name, group_df in group_dfs_1.items():
+        print(f"- {name}: {group_df.shape}")
+        # print(group_df.head()) # 첫 5행 출력으로 내용 확인
+else:
+    print("No group")
+
+all_available_ngs_features = sorted([c for c in df.columns if isinstance(c, str) and c.startswith("NGS____")])
+print(f"All_available_ngs_features: {(all_available_ngs_features)}")
+
+import os, math, numpy as np, matplotlib.pyplot as plt, networkx as nx
+import seaborn as sns
+import pandas as pd    
+
+def shorten(name: str) -> str:
+
+    s = re.sub(r'^(NGS_+|PCR_)', '', str(name))
+    s = re.sub(r'[\[\]]', '', s).strip()
+
+    parts = s.split()
+    if len(parts) >= 2:
+        genus_abbr = parts[0][0].upper() + '.'
+        rest = ' '.join(p.capitalize() for p in parts[1:])
+        return f'{genus_abbr} {rest}'
+    elif parts:
+        return parts[0].capitalize()
+    return name
+
+
+import os, math, numpy as np, matplotlib.pyplot as plt, networkx as nx
+import seaborn as sns, pandas as pd
+
+all_species = set().union(*groups_0, *groups_1)
+pastel = sns.color_palette('pastel', n_colors=len(all_species))
+species2color = dict(zip(sorted(all_species), pastel))
+
+def node_area(label, base=1800, per_char=180):
+    return base + per_char * len(label)
+
+def draw_group_network(group_nodes,
+                       corr_matrix,
+                       title,
+                       threshold=0.6,
+                       width_scale=6,
+                       k_base=0.35,
+                       save_dir='group_network_plots'):
+
+    # --- (a) ------------------------
+    nodes = sorted(group_nodes)
+    sub_corr = corr_matrix.loc[nodes, nodes]
+    G = nx.Graph()
+
+    for n in nodes:
+        G.add_node(n, label=shorten(n))
+
+    for i, n1 in enumerate(nodes):
+        for j in range(i + 1, len(nodes)):
+            n2 = nodes[j]
+            r = sub_corr.loc[n1, n2]
+            if pd.notna(r) and abs(r) >= threshold:
+                G.add_edge(n1, n2, weight=float(r))
+
+    # --- (b) (spring + padding) ---------------
+    k_val = k_base / math.sqrt(max(len(nodes), 2))
+    pos = nx.spring_layout(G, seed=1, k=k_val)
+    nx.rescale_layout_dict(pos, scale=0.8)       
+
+    # --- (c) -------------------------------
+    edge_widths = [abs(G[u][v]['weight']) * width_scale for u, v in G.edges()]
+    edge_labels = {(u, v): f"{G[u][v]['weight']:.2f}" for u, v in G.edges()}
+
+    node_sizes  = [node_area(G.nodes[n]['label']) for n in G.nodes()]
+    node_colors = [species2color[n] for n in G.nodes()]
+
+    # --- (d) -------------------------------------
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.margins(0.12)                         
+
+    nx.draw_networkx_edges(G, pos, ax=ax,
+                           width=edge_widths,
+                           edge_color='#9e9e9e', alpha=0.75)
+
+    nx.draw_networkx_nodes(G, pos, ax=ax,
+                           node_size=node_sizes,
+                           node_color=node_colors,
+                           edgecolors='#4d4d4d', linewidths=1.0)
+
+    nx.draw_networkx_labels(
+        G, pos, ax=ax,
+        labels={n: G.nodes[n]['label'] for n in G.nodes()},
+        font_size=11, font_weight='bold')
+
+    nx.draw_networkx_edge_labels(
+        G, pos, ax=ax,
+        edge_labels=edge_labels,
+        font_size=12, font_color='#505050',
+        label_pos=0.55,
+        bbox=dict(boxstyle='round,pad=0.1',
+                  fc='white', ec='none', alpha=0.9))
+
+    ax.set_title(title, fontsize=14, pad=12)
+    ax.axis('off')
+
+    # --- (e) -------------------------------------
+    os.makedirs(save_dir, exist_ok=True)
+    out = os.path.join(save_dir, f'{title}.png')
+    plt.savefig(out, dpi=300, bbox_inches='tight')
+    print(f"✅ saved → {out}")
+    plt.show()
+
+
+for idx, gset in enumerate(groups_0, 1):
+    draw_group_network(gset, corr_matrix_ngs_0,
+                       f"NonHal_Group_{idx}",
+                       threshold=CORRELATION_THRESHOLD)
+
+for idx, gset in enumerate(groups_1, 1):
+    draw_group_network(gset, corr_matrix_ngs_1,
+                       f"Hal_Group_{idx}",
+                       threshold=CORRELATION_THRESHOLD)
+
+import pandas as pd
+import re
+import networkx as nx
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve # roc_curve 추가
+from sklearn.preprocessing import StandardScaler
+import time
+from itertools import combinations 
+
+model_definitions = {}
+
+# a) Individual Non-halitosis Groups
+for i, group_set in enumerate(groups_0):
+    model_name = f"NonHal_Group_{i+1}"
+    feature_list = sorted(list(group_set))
+    if feature_list:
+        model_definitions[model_name] = feature_list
+
+# b) Individual Halitosis Groups
+for i, group_set in enumerate(groups_1):
+    model_name = f"Hal_Group_{i+1}"
+    feature_list = sorted(list(group_set))
+    if feature_list:
+        model_definitions[model_name] = feature_list
+
+print(f"{len(model_definitions)}Models.")
+
+# --- 3. Identify Unique Core Features for Single-Feature Models ---
+unique_core_features = set()
+for group in groups_0:
+    unique_core_features.update(group)
+for group in groups_1:
+    unique_core_features.update(group)
+
+# Ensure all features are actually in the dataframe columns
+all_available_ngs_features = sorted([c for c in df.columns if isinstance(c, str) and c.startswith("NGS____")])
+valid_unique_core_features = sorted([f for f in unique_core_features if f in all_available_ngs_features])
+
+if not valid_unique_core_features:
+    print("Error.")
+else:
+    print(f"{len(valid_unique_core_features)} NGS features.")
+    print(f"Details: {[abbreviate_feature_name(f) for f in valid_unique_core_features]}")
+
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score
+from imblearn.over_sampling import SMOTE
+from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+
+# ──────────────────────────────────────────────────────────────
+# 2. Hyper parameter grid
+# ──────────────────────────────────────────────────────────────
+LR_LIST    = [0.1, 0.05, 0.01, 0.005, 0.001]
+EPOCH_LIST = [500, 1000, 1500, 2000]
+BATCH_SIZE = 16
+K_FOLD     = 5
+
+skf = StratifiedKFold(n_splits=K_FOLD, shuffle=True, random_state=42)
+
+device   = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+criterion = nn.BCEWithLogitsLoss()
+
+class LR(nn.Module):                     
+    def __init__(self, in_dim):
+        super().__init__()
+        self.linear = nn.Linear(in_dim, 1)
+    def forward(self, x): return self.linear(x).squeeze(1)
+
+@torch.no_grad()
+def accuracy_and_probs(model, loader):
+    model.eval()
+    all_probs, all_labels = [], []
+    for x, y in loader:
+        logits = model(x.to(device))
+        probs  = torch.sigmoid(logits).cpu().numpy()
+        all_probs.extend(probs)                 # ★ 누적 ★
+        all_labels.extend(y.cpu().numpy())
+    preds = (np.array(all_probs) > 0.5).astype(int)
+    acc   = accuracy_score(all_labels, preds)
+    return acc, np.array(all_probs), np.array(all_labels)
+
+
+def train_epochs(model, ld, opt, n_ep):
+    model.train()
+    for _ in range(n_ep):
+        for x, y in ld:
+            x, y = x.to(device), y.to(device)
+            opt.zero_grad()
+            loss = criterion(model(x), y)
+            loss.backward(); opt.step()
+
+# ------------------------------------------------------------
+# Feature set
+# ------------------------------------------------------------
+model_results = {} 
+
+X = df[all_available_ngs_features]
+y = df['Halitosis']
+X_train_full, X_test_full, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+for model_name, feature_list in model_definitions.items():
+
+    valid_features = [f for f in feature_list if f in X_train_full.columns]
+    if not valid_features:
+        continue
+
+    X_tr_full  = X_train_full[valid_features].values
+    X_te_full  = X_test_full [valid_features].values
+    y_tr_full  = y_train.values
+    y_te_full  = y_test .values
+    in_dim     = X_tr_full.shape[1]
+
+    # ---------- 1) k-fold + SMOTE + Grid Search ----------
+    best_cfg, best_cv_auc = None, -1.0
+    best_state_dict, best_scaler = None, None
+
+    for lr in LR_LIST:
+        for n_ep in EPOCH_LIST:
+            fold_auc = []
+            for tr_idx, val_idx in skf.split(X_tr_full, y_tr_full):
+
+                # (a) fold 분리
+                X_tr, X_val = X_tr_full[tr_idx], X_tr_full[val_idx]
+                y_tr, y_val = y_tr_full[tr_idx], y_tr_full[val_idx]
+
+                # (b) scaling + SMOTE 
+                scaler  = StandardScaler().fit(X_tr)
+                X_tr_s  = scaler.transform(X_tr)
+                X_val_s = scaler.transform(X_val)
+                X_tr_sm, y_tr_sm = SMOTE(random_state=42)\
+                                      .fit_resample(X_tr_s, y_tr)
+
+                # (c) DataLoader
+                t = lambda a: torch.tensor(a, dtype=torch.float32)
+                train_ld = DataLoader(TensorDataset(t(X_tr_sm), t(y_tr_sm)),
+                                      batch_size=BATCH_SIZE, shuffle=True)
+                val_ld   = DataLoader(TensorDataset(t(X_val_s),  t(y_val)),
+                                      batch_size=BATCH_SIZE)
+
+                # (d) 학습
+                model = LR(in_dim).to(device)
+                opt   = optim.Adam(model.parameters(), lr=lr)
+                train_epochs(model, train_ld, opt, n_ep)
+
+                # (e) AUROC
+                val_acc, val_probs, val_labels = accuracy_and_probs(model, val_ld)
+                auc = roc_auc_score(val_labels, val_probs)
+                fold_auc.append(auc)
+
+            mean_auc = np.mean(fold_auc)
+            print(f"    lr={lr:<6}  ep={n_ep:<4} | mean CV AUROC={mean_auc:.4f}")
+
+            if mean_auc > best_cv_auc:
+                best_cv_auc = mean_auc
+                best_cfg    = (lr, n_ep)
+                best_state_dict = model.state_dict()      
+                best_scaler = scaler                     
+
+    print(f"  >> Best cfg: lr={best_cfg[0]}, epochs={best_cfg[1]}  (CV AUROC={best_cv_auc:.4f})")
+
+    # ----------  train + SMOTE   ----------------
+    scaler_full = StandardScaler().fit(X_tr_full)
+    X_tr_s      = scaler_full.transform(X_tr_full)
+    X_tr_sm, y_tr_sm = SMOTE(random_state=42).fit_resample(X_tr_s, y_tr_full)
+
+    t = lambda a: torch.tensor(a, dtype=torch.float32)
+    train_ld = DataLoader(TensorDataset(t(X_tr_sm), t(y_tr_sm)),
+                          batch_size=BATCH_SIZE, shuffle=True)
+
+    final_model = LR(in_dim).to(device)
+    final_opt   = optim.Adam(final_model.parameters(), lr=best_cfg[0])
+    train_epochs(final_model, train_ld, final_opt, best_cfg[1])
+
+    # ---------- test -------------------------------
+    X_te_s = scaler_full.transform(X_te_full)
+    test_ld = DataLoader(TensorDataset(t(X_te_s), t(y_te_full)),
+                         batch_size=BATCH_SIZE)
+
+    acc, y_prob, _ = accuracy_and_probs(final_model, test_ld)   
+    auroc          = roc_auc_score(y_te_full, y_prob)
+    fpr, tpr, _    = roc_curve   (y_te_full, y_prob)
+    lo, up         = bootstrap_auc_ci(y_te_full, y_prob)
+    auc_ci_str     = f"{lo:.3f} - {up:.3f}"
+
+    model_results[model_name] = {
+        'Type'            : 'Group',
+        'Num_Features'    : len(valid_features),
+        'Accuracy'        : acc * 100,
+        'AUROC'           : auroc,
+        'AUROC_95_CI'     : auc_ci_str,
+        'fpr'             : fpr,
+        'tpr'             : tpr,
+        'y_pred_proba'    : y_prob,
+        'Best_Params'     : {'lr': best_cfg[0], 'epochs': best_cfg[1]},
+        'CV_AUROC'        : best_cv_auc,
+        'Features_Summary': ", ".join([abbreviate_feature_name(f)
+                                       for f in valid_features])
+    }
+    print(f"  >> Acc={acc*100:.2f}%, AUROC={auroc:.3f}")
+
+if not valid_unique_core_features:
+    print("No single features.")
+else:
+    for feature in valid_unique_core_features:
+        model_name = f"Single_{abbreviate_feature_name(feature)}"
+        print(f": {model_name} (Feature: {feature})")
+
+        X_tr_full = X_train_full[[feature]].values   
+        X_te_full = X_test_full [[feature]].values
+        y_tr_full = y_train.values
+        y_te_full = y_test .values
+        in_dim    = 1
+
+        # ---------- ① k-fold CV + Grid Search ----------
+        best_cfg, best_cv_auc = None, -1.0
+        for lr in LR_LIST:
+            for n_ep in EPOCH_LIST:
+                fold_auc = []
+                for tr_idx, val_idx in skf.split(X_tr_full, y_tr_full):
+                    # (a) split
+                    X_tr, X_val = X_tr_full[tr_idx], X_tr_full[val_idx]
+                    y_tr, y_val = y_tr_full[tr_idx], y_tr_full[val_idx]
+
+                    # (b) scaling + SMOTE
+                    scaler  = StandardScaler().fit(X_tr)
+                    X_tr_s  = scaler.transform(X_tr)
+                    X_val_s = scaler.transform(X_val)
+                    X_tr_sm, y_tr_sm = SMOTE(random_state=42)\
+                                          .fit_resample(X_tr_s, y_tr)
+
+                    # (c) DataLoader
+                    t = lambda a: torch.tensor(a, dtype=torch.float32)
+                    train_ld = DataLoader(TensorDataset(t(X_tr_sm), t(y_tr_sm)),
+                                          batch_size=BATCH_SIZE, shuffle=True)
+                    val_ld   = DataLoader(TensorDataset(t(X_val_s),  t(y_val)),
+                                          batch_size=BATCH_SIZE)
+
+                    # (d) 학습
+                    model = LR(in_dim).to(device)
+                    opt   = optim.Adam(model.parameters(), lr=lr)
+                    train_epochs(model, train_ld, opt, n_ep)
+
+                    # (e) AUROC
+                    _, p, l = accuracy_and_probs(model, val_ld)
+                    fold_auc.append(roc_auc_score(l, p))
+
+                mean_auc = np.mean(fold_auc)
+                if mean_auc > best_cv_auc:
+                    best_cv_auc = mean_auc
+                    best_cfg    = (lr, n_ep)
+
+        print(f"  >> Best cfg: lr={best_cfg[0]}, epochs={best_cfg[1]} "
+              f"(CV AUROC={best_cv_auc:.4f})")
+
+        # ---------- train + SMOTE ----------
+        scaler = StandardScaler().fit(X_tr_full)
+        X_tr_s = scaler.transform(X_tr_full)
+        X_tr_sm, y_tr_sm = SMOTE(random_state=42)\
+                              .fit_resample(X_tr_s, y_tr_full)
+
+        t = lambda a: torch.tensor(a, dtype=torch.float32)
+        train_ld = DataLoader(TensorDataset(t(X_tr_sm), t(y_tr_sm)),
+                              batch_size=BATCH_SIZE, shuffle=True)
+
+        final_model = LR(in_dim).to(device)
+        final_opt   = optim.Adam(final_model.parameters(), lr=best_cfg[0])
+        train_epochs(final_model, train_ld, final_opt, best_cfg[1])
+
+        # ---------- test ----------
+        X_te_s = scaler.transform(X_te_full)
+        test_ld = DataLoader(TensorDataset(t(X_te_s), t(y_te_full)),
+                             batch_size=BATCH_SIZE)
+
+        acc, y_prob, _ = accuracy_and_probs(final_model, test_ld)
+        auroc          = roc_auc_score(y_te_full, y_prob)
+        fpr, tpr, _    = roc_curve   (y_te_full, y_prob)
+        lo, up         = bootstrap_auc_ci(y_te_full, y_prob)
+        auc_ci_str     = f"{lo:.3f} - {up:.3f}"
+
+        # ---------- results ----------
+        model_results[model_name] = {
+            'Type'            : 'Single',
+            'Num_Features'    : 1,
+            'Accuracy'        : acc * 100,
+            'AUROC'           : auroc,
+            'AUROC_95_CI'     : auc_ci_str,
+            'fpr'             : fpr,
+            'tpr'             : tpr,
+            'y_pred_proba'    : y_prob,
+            'Best_Params'     : {'lr': best_cfg[0], 'epochs': best_cfg[1]},
+            'CV_AUROC'        : best_cv_auc,
+            'Features_Summary': abbreviate_feature_name(feature)
+        }
+        print(f"  >> Acc={acc*100:.2f}%, AUROC={auroc:.3f}")
+
+from sklearn.utils import resample
+from sklearn.metrics import roc_curve
+
+def bootstrap_roc_ci(y_true, y_score, n_boot=1000, alpha=0.05, seed=0):
+    rng = np.random.RandomState(seed)
+    fpr_grid = np.linspace(0, 1, 101)          # 0.00‒1.00
+    tprs = []
+
+    for _ in range(n_boot):
+        idx = rng.randint(0, len(y_true), len(y_true))
+        if len(np.unique(y_true[idx])) < 2:     
+            continue
+        fpr, tpr, _ = roc_curve(y_true[idx], y_score[idx])
+        tpr_interp = np.interp(fpr_grid, fpr, tpr)
+        tpr_interp[0] = 0.0                     
+        tprs.append(tpr_interp)
+
+    tprs = np.array(tprs)
+    lower = np.percentile(tprs, 100*alpha/2, axis=0)
+    upper = np.percentile(tprs, 100*(1-alpha/2), axis=0)
+    return fpr_grid, lower, upper
+
+
+import matplotlib.pyplot as plt
+
+# 1) ROC+CI plot
+def plot_roc_with_ci(model_results, model_names, y_test,
+                     title='ROC with 95 % CI',
+                     filename='roc_ci.png',
+                     ci_boot=1000, alpha=0.05, shade=True):
+
+    plt.figure(figsize=(10, 8))
+
+    for name in model_names:
+        res = model_results.get(name)
+        if not res: continue
+        fpr, tpr, auroc = res['fpr'], res['tpr'], res['AUROC']
+        ci_str = res['AUROC_95_CI']
+        y_pred = res['y_pred_proba']
+
+        plt.plot(fpr, tpr, lw=2,
+                 label=f"{name}\nAUC={auroc:.3f} [{ci_str}]")
+
+        # ----- CI band -----
+        if shade:
+            grid, lo, hi = bootstrap_roc_ci(
+                y_test.values, y_pred, n_boot=ci_boot, alpha=alpha)
+            plt.fill_between(grid, lo, hi, alpha=0.25)
+
+    # Diagonal
+    plt.plot([0, 1], [0, 1], '--', color='grey', lw=1.2, label='Random (AUC = 0.5)')
+
+    plt.xlim([0, 1]); plt.ylim([0, 1.05])
+    plt.xlabel('False Positive Rate',  fontsize=15)
+    plt.ylabel('True Positive Rate',   fontsize=15)
+    plt.title(title, fontsize=20)
+    # ---------- 큰 legend ----------
+    plt.legend(loc='lower right',
+               fontsize=12,            
+               frameon=True,
+               framealpha=0.9,
+               borderpad=1.2,
+               labelspacing=1.2)      
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300)
+    print(f"✅ saved → {filename}")
+    plt.show()
+
+
+top = ['NonHal_Group_1', 'NonHal_Group_2',
+  'Hal_Group_1', 'Hal_Group_2','Hal_Group_3']
+
+models_to_plot = list(dict.fromkeys(top)) 
+plot_roc_with_ci(model_results, models_to_plot, y_test,
+                 title='ROC Curve', filename='roc_noci.png',
+                 shade=True)
+
+
+top = ['Single_P. gingivalis']
+models_to_plot = list(dict.fromkeys(top))  
+
+plot_roc_with_ci(model_results, models_to_plot, y_test,
+                 title='ROC Curve', filename='roc_noci.png',
+                 shade=True)
