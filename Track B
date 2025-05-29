@@ -1,0 +1,177 @@
+import pandas as pd
+import re
+import networkx as nx
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+file_path = "PCR_NGS_Data.xlsx"
+try:
+    df = pd.read_excel(file_path, skiprows=6)
+except FileNotFoundError:
+    print(f"Error: '{file_path}'")
+
+print(f"Data Size: {df.shape}")
+
+ngs_cols = [col for col in df.columns if col.startswith("__")]
+
+ngs_groups = {}
+for col in ngs_cols:
+    base_name = re.sub(r'\.\d+$', '', col)
+    ngs_groups.setdefault(base_name, []).append(col)
+
+all_cols_to_remove = set()
+
+for base_name, cols in ngs_groups.items():
+    new_col_name = f"NGS{base_name}"
+    df[new_col_name] = df[cols].sum(axis=1)
+
+    for c in cols:
+        all_cols_to_remove.add(c)
+
+df.drop(columns=list(all_cols_to_remove), inplace=True)
+
+import pandas as pd
+from scipy.stats import ttest_ind
+import numpy as np
+import matplotlib.pyplot as plt
+import re
+import os 
+species_vars = [col for col in df.columns if col.startswith("NGS__")]
+
+group0 = df[df["Halitosis"] == 0]  # Non-Halitosis
+group1 = df[df["Halitosis"] == 1]  # Halitosis
+
+results = [] 
+
+for var in species_vars:
+    data0 = group0[var].dropna()
+    data1 = group1[var].dropna()
+
+    if len(data0) < 2 or len(data1) < 2: # Need at least 2 samples per group for t-test variance calculation
+        # print(f"Skipping {var}: Insufficient data in one or both groups.")
+        results.append({
+            "Species": var,
+            "Non-Halitosis_Mean": data0.mean() if len(data0)>0 else np.nan,
+            "Non-Halitosis_Std": data0.std() if len(data0)>1 else np.nan,
+            "Halitosis_Mean": data1.mean() if len(data1)>0 else np.nan,
+            "Halitosis_Std": data1.std() if len(data1)>1 else np.nan,
+            "P-value": np.nan 
+        })
+        continue
+
+    mean0 = data0.mean()
+    std0 = data0.std()
+    mean1 = data1.mean()
+    std1 = data1.std()
+
+    # Welch's t-test
+    # Check for zero variance within a group (can happen with low counts/presence-absence)
+    if np.var(data0) == 0 and np.var(data1) == 0 and mean0 == mean1:
+         t_stat, p_value = 0, 1.0 # No difference if both are constant and equal
+    elif np.var(data0) == 0 and np.var(data1) == 0 and mean0 != mean1:
+         t_stat, p_value = np.inf, 0.0 # Definite difference if both constant but unequal
+    else:
+         t_stat, p_value = ttest_ind(data0, data1, equal_var=False, nan_policy='omit') # nan_policy='omit' redundant here but safe
+
+    results.append({
+        "Species": var,
+        "Non-Halitosis_Mean": mean0,
+        "Non-Halitosis_Std": std0,
+        "Halitosis_Mean": mean1,
+        "Halitosis_Std": std1,
+        "P-value": p_value
+    })
+
+results_df = pd.DataFrame(results)
+
+significant_df = results_df[results_df['P-value'].notna() & (results_df['P-value'] < 0.05)].copy()
+
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import textwrap, re
+
+def shorten(full_name: str) -> str:
+    s = full_name.replace("NGS__", "")
+    s = re.sub(r"[\[\]]", "", s)        
+    parts = s.split()
+    if len(parts) >= 2:
+        return f"{parts[0][0]}. " + " ".join(parts[1:])
+    return s
+
+plot_df = (
+    significant_df
+    .copy()
+    .sort_values("Species")
+    .reset_index(drop=True)
+)
+plot_df["Short"] = plot_df["Species"].apply(shorten)
+
+species     = plot_df["Species"].tolist()
+labels      = plot_df["Short"].tolist()
+n           = len(species)
+
+non_raw     = plot_df["Non-Halitosis_Mean"].values
+hal_raw     = plot_df["Halitosis_Mean"].values
+
+
+denom       = np.maximum(non_raw, hal_raw)
+denom[denom == 0] = 1                     
+non_norm    = non_raw / denom
+hal_norm    = hal_raw / denom
+
+inner_r     = 5.0
+max_bar     = inner_r * 0.30              
+non_len     = non_norm * max_bar
+hal_len     = hal_norm * max_bar
+
+cmap        = plt.cm.get_cmap("tab20", n)
+colors      = [cmap(i) for i in range(n)]
+color_dic   = dict(zip(species, colors))
+
+theta       = np.linspace(0, 2*np.pi, n, endpoint=False)
+bar_w       = 2*np.pi / n * 0.95
+
+
+plt.rcParams.update({"font.size": 7})
+fig, axes = plt.subplots(1, 2, figsize=(14, 8),
+                         subplot_kw=dict(projection="polar"))
+
+for ax, title, lengths in zip(
+        axes,
+        ["Non‑Halitosis", "Halitosis"],
+        [non_len, hal_len]):
+
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(-1)
+    ax.set_ylim(0, inner_r + max_bar * 1.05)
+    ax.set_yticklabels([])
+    ax.grid(False)                       
+    ax.spines['polar'].set_visible(False)
+
+    for th, l, sp in zip(theta, lengths, species):
+        ax.bar(th, l, width=bar_w,
+               bottom=inner_r,
+               color=color_dic[sp],
+               edgecolor="white", linewidth=0.4)
+
+    ax.set_xticks(theta)
+    ax.set_xticklabels(
+        [textwrap.shorten(t, 25, placeholder="…") for t in labels],
+        fontsize=6, fontstyle='italic', va='center'
+    )
+    ax.set_title(title, y=1.08, fontsize=12, weight='bold')
+
+from matplotlib.patches import Patch
+handles = [Patch(facecolor=color_dic[s], label=l) for s, l in zip(species, labels)]
+fig.legend(handles=handles, loc="lower center",
+           bbox_to_anchor=(0.5, -0.1),
+           ncol=min(6, n), fontsize=7, frameon=False)
+
+fig.suptitle("Species Abundance — Halitosis vs Non‑Halitosis\n(normalized within each species)",
+             fontsize=15, y=0.97)
+plt.tight_layout()
+plt.show()
+
