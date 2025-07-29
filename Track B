@@ -1,177 +1,348 @@
 import pandas as pd
-import re
-import networkx as nx
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
-
-file_path = "PCR_NGS_Data.xlsx"
-try:
-    df = pd.read_excel(file_path, skiprows=6)
-except FileNotFoundError:
-    print(f"Error: '{file_path}'")
-
-print(f"Data Size: {df.shape}")
-
-ngs_cols = [col for col in df.columns if col.startswith("__")]
-
-ngs_groups = {}
-for col in ngs_cols:
-    base_name = re.sub(r'\.\d+$', '', col)
-    ngs_groups.setdefault(base_name, []).append(col)
-
-all_cols_to_remove = set()
-
-for base_name, cols in ngs_groups.items():
-    new_col_name = f"NGS{base_name}"
-    df[new_col_name] = df[cols].sum(axis=1)
-
-    for c in cols:
-        all_cols_to_remove.add(c)
-
-df.drop(columns=list(all_cols_to_remove), inplace=True)
-
-import pandas as pd
-from scipy.stats import ttest_ind
-import numpy as np
-import matplotlib.pyplot as plt
+import networkx as nx
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve
+from imblearn.over_sampling import SMOTE
 import re
-import os 
-species_vars = [col for col in df.columns if col.startswith("NGS__")]
+import os
+import time
 
-group0 = df[df["Halitosis"] == 0]  # Non-Halitosis
-group1 = df[df["Halitosis"] == 1]  # Halitosis
+# ===================================================================
+# 1. Configuration & Constants
+# ===================================================================
+FILE_PATH = "PCR_NGS_Data.xlsx"
+OUTPUT_DIR = "analysis_outputs"
+CORRELATION_THRESHOLD = 0.6
 
-results = [] 
+HYPERPARAMS = {
+    'lr': [0.1, 0.05, 0.01, 0.005],
+    'epochs': [500, 1000, 1500, 2000]
+}
+BATCH_SIZE = 16
+K_FOLDS = 5
+RANDOM_STATE = 42
 
-for var in species_vars:
-    data0 = group0[var].dropna()
-    data1 = group1[var].dropna()
+DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-    if len(data0) < 2 or len(data1) < 2: # Need at least 2 samples per group for t-test variance calculation
-        # print(f"Skipping {var}: Insufficient data in one or both groups.")
-        results.append({
-            "Species": var,
-            "Non-Halitosis_Mean": data0.mean() if len(data0)>0 else np.nan,
-            "Non-Halitosis_Std": data0.std() if len(data0)>1 else np.nan,
-            "Halitosis_Mean": data1.mean() if len(data1)>0 else np.nan,
-            "Halitosis_Std": data1.std() if len(data1)>1 else np.nan,
-            "P-value": np.nan 
-        })
-        continue
+# ===================================================================
+# 2. Helper Functions & Classes
+# ===================================================================
 
-    mean0 = data0.mean()
-    std0 = data0.std()
-    mean1 = data1.mean()
-    std1 = data1.std()
-
-    # Welch's t-test
-    # Check for zero variance within a group (can happen with low counts/presence-absence)
-    if np.var(data0) == 0 and np.var(data1) == 0 and mean0 == mean1:
-         t_stat, p_value = 0, 1.0 # No difference if both are constant and equal
-    elif np.var(data0) == 0 and np.var(data1) == 0 and mean0 != mean1:
-         t_stat, p_value = np.inf, 0.0 # Definite difference if both constant but unequal
-    else:
-         t_stat, p_value = ttest_ind(data0, data1, equal_var=False, nan_policy='omit') # nan_policy='omit' redundant here but safe
-
-    results.append({
-        "Species": var,
-        "Non-Halitosis_Mean": mean0,
-        "Non-Halitosis_Std": std0,
-        "Halitosis_Mean": mean1,
-        "Halitosis_Std": std1,
-        "P-value": p_value
-    })
-
-results_df = pd.DataFrame(results)
-
-significant_df = results_df[results_df['P-value'].notna() & (results_df['P-value'] < 0.05)].copy()
-
-
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import textwrap, re
-
-def shorten(full_name: str) -> str:
-    s = full_name.replace("NGS__", "")
-    s = re.sub(r"[\[\]]", "", s)        
+def shorten_species_name(full_name: str) -> str:
+    s = re.sub(r'^(NGS_MAPPED_|PCR_)', '', str(full_name)).replace("_", " ")
     parts = s.split()
     if len(parts) >= 2:
-        return f"{parts[0][0]}. " + " ".join(parts[1:])
-    return s
+        return f"{parts[0][0].upper()}. {parts[1]}"
+    return s if not parts else parts[0]
 
-plot_df = (
-    significant_df
-    .copy()
-    .sort_values("Species")
-    .reset_index(drop=True)
-)
-plot_df["Short"] = plot_df["Species"].apply(shorten)
+def load_and_map_data(file_path: str) -> pd.DataFrame:
+    df = pd.read_excel(file_path, skiprows=6)
 
-species     = plot_df["Species"].tolist()
-labels      = plot_df["Short"].tolist()
-n           = len(species)
+    raw_ngs_cols = [c for c in df.columns if c.startswith("__") and c != "__"]
+    base_names = pd.Series(raw_ngs_cols).str.replace(r'\.\d+$', '', regex=True)
+    for base_name in base_names.unique():
+        cols_to_sum = [col for col in raw_ngs_cols if re.sub(r'\.\d+$', '', col) == base_name]
+        df[f"NGS{base_name}"] = df[cols_to_sum].sum(axis=1)
+    df.drop(columns=raw_ngs_cols, inplace=True)
 
-non_raw     = plot_df["Non-Halitosis_Mean"].values
-hal_raw     = plot_df["Halitosis_Mean"].values
+    pcr_species_list = [
+        "Aggregatibacter actinomycetemcomitans", "Prevotella intermedia", "Prevotella nigrescens",
+        "Lactobacillus casei", "Fusobacterium nucleatum", "Streptococcus mutans",
+        "Streptococcus sobrinus", "Treponema denticola", "Porphyromonas gingivalis",
+        "Tannerella forsythia", "Eikenella corrodens", "Parvimonas micra",
+        "Campylobacter rectus", "Eubacterium nodatum", "Fusobacterium alocis",
+        "Porphyromonas endodontalis"
+    ]
+
+    ngs_cols = [c for c in df.columns if c.startswith("NGS__")]
+    for sp in pcr_species_list:
+        matching_cols = [c for c in ngs_cols if sp in c]
+        new_col_name = f"NGS_MAPPED_{sp.replace(' ', '_')}"
+        df[new_col_name] = df[matching_cols].sum(axis=1) if matching_cols else 0
+
+        if sp in df.columns:
+            df.rename(columns={sp: f"PCR_{sp.replace(' ', '_')}"}, inplace=True)
+
+    return df
+
+def analyze_and_plot_correlations(df: pd.DataFrame):
+    ngs_cols_for_corr = [c for c in df.columns if c.startswith("NGS_MAPPED_")]
+
+    df_0 = df[df["Halitosis"] == 0]
+    df_1 = df[df["Halitosis"] == 1]
+
+    corr_matrix_0 = df_0[ngs_cols_for_corr].corr(method='pearson')
+    corr_matrix_1 = df_1[ngs_cols_for_corr].corr(method='pearson')
+
+    _plot_correlation_heatmap(corr_matrix_0, "NGS Correlation (Non-Halitosis Group)")
+    _plot_correlation_heatmap(corr_matrix_1, "NGS Correlation (Halitosis Group)")
+
+    return corr_matrix_0, corr_matrix_1
+
+def _find_correlation_groups(corr_matrix, threshold):
+    G = nx.from_pandas_adjacency(corr_matrix.fillna(0))
+    edges_to_remove = [(u, v) for u, v, w in G.edges(data='weight') if abs(w) < threshold]
+    G.remove_edges_from(edges_to_remove)
+    return [list(c) for c in nx.connected_components(G) if len(c) >= 2]
 
 
-denom       = np.maximum(non_raw, hal_raw)
-denom[denom == 0] = 1                     
-non_norm    = non_raw / denom
-hal_norm    = hal_raw / denom
+def _plot_correlation_heatmap(corr_matrix: pd.DataFrame, title: str):
+    abbrev_map = {col: shorten_species_name(col) for col in corr_matrix.columns}
+    corr_abbrev = corr_matrix.rename(index=abbrev_map, columns=abbrev_map)
+    cmap = sns.diverging_palette(240, 10, s=99, l=45, as_cmap=True)
 
-inner_r     = 5.0
-max_bar     = inner_r * 0.30              
-non_len     = non_norm * max_bar
-hal_len     = hal_norm * max_bar
-
-cmap        = plt.cm.get_cmap("tab20", n)
-colors      = [cmap(i) for i in range(n)]
-color_dic   = dict(zip(species, colors))
-
-theta       = np.linspace(0, 2*np.pi, n, endpoint=False)
-bar_w       = 2*np.pi / n * 0.95
-
-
-plt.rcParams.update({"font.size": 7})
-fig, axes = plt.subplots(1, 2, figsize=(14, 8),
-                         subplot_kw=dict(projection="polar"))
-
-for ax, title, lengths in zip(
-        axes,
-        ["Non‑Halitosis", "Halitosis"],
-        [non_len, hal_len]):
-
-    ax.set_theta_zero_location("N")
-    ax.set_theta_direction(-1)
-    ax.set_ylim(0, inner_r + max_bar * 1.05)
-    ax.set_yticklabels([])
-    ax.grid(False)                       
-    ax.spines['polar'].set_visible(False)
-
-    for th, l, sp in zip(theta, lengths, species):
-        ax.bar(th, l, width=bar_w,
-               bottom=inner_r,
-               color=color_dic[sp],
-               edgecolor="white", linewidth=0.4)
-
-    ax.set_xticks(theta)
-    ax.set_xticklabels(
-        [textwrap.shorten(t, 25, placeholder="…") for t in labels],
-        fontsize=6, fontstyle='italic', va='center'
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(
+        corr_abbrev, cmap=cmap, vmin=-0.2, vmax=1, center=0.0,
+        linewidths=.5, square=True, annot=True, fmt='.2f',
+        annot_kws={'size': 9}, cbar_kws={'shrink': 0.8}
     )
-    ax.set_title(title, y=1.08, fontsize=12, weight='bold')
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
+    plt.title(title, fontsize=16, pad=20)
+    plt.tight_layout()
+    plt.show()
 
-from matplotlib.patches import Patch
-handles = [Patch(facecolor=color_dic[s], label=l) for s, l in zip(species, labels)]
-fig.legend(handles=handles, loc="lower center",
-           bbox_to_anchor=(0.5, -0.1),
-           ncol=min(6, n), fontsize=7, frameon=False)
+def find_and_visualize_groups(corr_matrix_0, corr_matrix_1):
+    groups_0 = _find_correlation_groups(corr_matrix_0, CORRELATION_THRESHOLD)
+    groups_1 = _find_correlation_groups(corr_matrix_1, CORRELATION_THRESHOLD)
 
-fig.suptitle("Species Abundance — Halitosis vs Non‑Halitosis\n(normalized within each species)",
-             fontsize=15, y=0.97)
-plt.tight_layout()
-plt.show()
+    all_species = set().union(*groups_0, *groups_1)
+    species_color_map = dict(zip(sorted(all_species), sns.color_palette('pastel', n_colors=len(all_species))))
 
+    for i, g_set in enumerate(groups_0, 1):
+        _draw_group_network(g_set, corr_matrix_0, f"NonHal_Group_{i}", species_color_map)
+    for i, g_set in enumerate(groups_1, 1):
+        _draw_group_network(g_set, corr_matrix_1, f"Hal_Group_{i}", species_color_map)
+
+    return groups_0, groups_1
+
+def _find_correlation_groups(corr_matrix, threshold):
+    G = nx.from_pandas_adjacency(corr_matrix.fillna(0))
+    edges_to_remove = [(u, v) for u, v, w in G.edges(data='weight') if abs(w) < threshold]
+    G.remove_edges_from(edges_to_remove)
+    return [list(c) for c in nx.connected_components(G) if len(c) >= 2]
+
+def _draw_group_network(group_nodes, corr_matrix, title, color_map):
+    G = nx.Graph()
+    nodes = sorted(group_nodes)
+    for n in nodes: G.add_node(n, label=shorten_species_name(n))
+
+    for i, n1 in enumerate(nodes):
+        for j in range(i + 1, len(nodes)):
+            n2 = nodes[j]
+            r = corr_matrix.loc[n1, n2]
+            if pd.notna(r) and abs(r) >= CORRELATION_THRESHOLD:
+                G.add_edge(n1, n2, weight=float(r))
+
+    pos = nx.spring_layout(G, seed=RANDOM_STATE, k=0.5 / np.sqrt(len(nodes)))
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+    nx.draw(G, pos, ax=ax, with_labels=False, node_size=[1800 + 180 * len(G.nodes[n]['label']) for n in G.nodes()],
+            node_color=[color_map[n] for n in G.nodes()], edge_color='#9e9e9e', width=[abs(G[u][v]['weight']) * 6 for u, v in G.edges()])
+    nx.draw_networkx_labels(G, pos, labels={n: G.nodes[n]['label'] for n in G.nodes()}, font_size=11, font_weight='bold')
+    nx.draw_networkx_edge_labels(G, pos, edge_labels={(u, v): f"{G[u][v]['weight']:.2f}" for u, v in G.edges()}, font_size=11)
+
+    ax.set_title(title, fontsize=14)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    plt.savefig(os.path.join(OUTPUT_DIR, f"{title}.png"), dpi=300)
+    plt.show()
+
+# --- PyTorch Model & Training Utilities ---
+class LogisticRegressionModel(nn.Module):
+    def __init__(self, in_dim):
+        super().__init__()
+        self.linear = nn.Linear(in_dim, 1)
+    def forward(self, x):
+        return self.linear(x).squeeze(-1)
+
+def train_and_evaluate_model(model_name, features, X_train_full, y_train, X_test_full, y_test):
+    print(f"\n--- Processing Model: {model_name} ---")
+
+    # 1. 데이터 준비
+    X_tr = X_train_full[features].values
+    X_te = X_test_full[features].values
+    y_tr = y_train.values
+    y_te = y_test.values
+    in_dim = X_tr.shape[1]
+
+
+    skf = StratifiedKFold(n_splits=K_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    best_params, best_cv_auc = None, -1.0
+
+    for lr in HYPERPARAMS['lr']:
+        for epochs in HYPERPARAMS['epochs']:
+            fold_aucs = []
+            for train_idx, val_idx in skf.split(X_tr, y_tr):
+                X_tr_fold, X_val_fold = X_tr[train_idx], X_tr[val_idx]
+                y_tr_fold, y_val_fold = y_tr[train_idx], y_tr[val_idx]
+
+                scaler = StandardScaler().fit(X_tr_fold)
+                X_tr_s = scaler.transform(X_tr_fold)
+                X_val_s = scaler.transform(X_val_fold)
+
+                X_res, y_res = SMOTE(random_state=RANDOM_STATE).fit_resample(X_tr_s, y_tr_fold)
+
+                train_ds = TensorDataset(torch.tensor(X_res, dtype=torch.float32), torch.tensor(y_res, dtype=torch.float32))
+                val_ds = TensorDataset(torch.tensor(X_val_s, dtype=torch.float32), torch.tensor(y_val_fold, dtype=torch.float32))
+                train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
+                val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
+
+                model = LogisticRegressionModel(in_dim).to(DEVICE)
+                optimizer = optim.Adam(model.parameters(), lr=lr)
+                criterion = nn.BCEWithLogitsLoss()
+
+                for _ in range(epochs):
+                    for x_batch, y_batch in train_loader:
+                        model.train()
+                        x_batch, y_batch = x_batch.to(DEVICE), y_batch.to(DEVICE)
+                        optimizer.zero_grad()
+                        outputs = model(x_batch)
+                        loss = criterion(outputs, y_batch)
+                        loss.backward()
+                        optimizer.step()
+
+                model.eval()
+                with torch.no_grad():
+                    val_probs = []
+                    for x_batch, _ in val_loader:
+                        val_probs.extend(torch.sigmoid(model(x_batch.to(DEVICE))).cpu().numpy())
+                fold_aucs.append(roc_auc_score(y_val_fold, val_probs))
+
+            mean_auc = np.mean(fold_aucs)
+            if mean_auc > best_cv_auc:
+                best_cv_auc = mean_auc
+                best_params = {'lr': lr, 'epochs': epochs}
+
+    print(f"Best CV AUROC: {best_cv_auc:.4f} with params: {best_params}")
+
+ 
+    final_scaler = StandardScaler().fit(X_tr)
+    X_tr_s_final = final_scaler.transform(X_tr)
+    X_res_final, y_res_final = SMOTE(random_state=RANDOM_STATE).fit_resample(X_tr_s_final, y_tr)
+
+    train_ds_final = TensorDataset(torch.tensor(X_res_final, dtype=torch.float32), torch.tensor(y_res_final, dtype=torch.float32))
+    train_loader_final = DataLoader(train_ds_final, batch_size=BATCH_SIZE, shuffle=True)
+
+    final_model = LogisticRegressionModel(in_dim).to(DEVICE)
+    optimizer = optim.Adam(final_model.parameters(), lr=best_params['lr'])
+    criterion = nn.BCEWithLogitsLoss()
+
+    for _ in range(best_params['epochs']):
+        for x_batch, y_batch in train_loader_final:
+            final_model.train()
+            x_batch, y_batch = x_batch.to(DEVICE), y_batch.to(DEVICE)
+            optimizer.zero_grad()
+            outputs = final_model(x_batch)
+            loss = criterion(outputs, y_batch)
+            loss.backward()
+            optimizer.step()
+
+    X_te_s = final_scaler.transform(X_te)
+    final_model.eval()
+    with torch.no_grad():
+        y_prob = torch.sigmoid(final_model(torch.tensor(X_te_s, dtype=torch.float32).to(DEVICE))).cpu().numpy()
+
+    y_pred = (y_prob > 0.5).astype(int)
+    accuracy = accuracy_score(y_te, y_pred)
+    auroc = roc_auc_score(y_te, y_prob)
+
+    if len(features) > 1:
+        plot_feature_importance(final_model, features, model_name)
+
+    return {
+        'Accuracy(%)': accuracy * 100,
+        'AUROC': auroc,
+        'CV_AUROC': best_cv_auc,
+        'Best_Params': best_params,
+        'Num_Features': len(features),
+        'Features_Summary': ", ".join([shorten_species_name(f) for f in features])
+    }
+
+def plot_feature_importance(model, feature_names, model_name):
+    print(f"Visualizing feature importance for {model_name}...")
+    weights = model.linear.weight.data.cpu().numpy().flatten()
+    odds_ratios = np.exp(weights)
+
+    importance_df = pd.DataFrame({
+        'Feature': [shorten_species_name(f) for f in feature_names],
+        'Coefficient': weights,
+        'Odds Ratio': odds_ratios
+    }).sort_values('Coefficient', ascending=False)
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, max(4, len(feature_names) * 0.5)))
+    sns.barplot(x='Coefficient', y='Feature', data=importance_df, ax=axes[0], palette='vlag')
+    axes[0].set_title('Feature Coefficients')
+    axes[0].axvline(0, color='k', lw=0.8)
+
+    sns.barplot(x='Odds Ratio', y='Feature', data=importance_df, ax=axes[1], palette='crest')
+    axes[1].set_title('Odds Ratios')
+    axes[1].axvline(1, color='k', ls='--', lw=0.8)
+
+    fig.suptitle(f"Feature Importance for {model_name}", fontsize=16)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    save_path = os.path.join(OUTPUT_DIR, f"{model_name}_feature_importance.png")
+    plt.savefig(save_path, dpi=300)
+    plt.show()
+
+# ===================================================================
+# 3. Main Pipeline Execution
+# ===================================================================
+if __name__ == "__main__":
+    # Step 1
+    analysis_ready_df = load_and_map_data(FILE_PATH)
+
+    # Step 2
+    corr_0, corr_1 = analyze_and_plot_correlations(analysis_ready_df)
+
+    # Step 3
+    groups_0, groups_1 = find_and_visualize_groups(corr_0, corr_1)
+
+    # Step 4
+    model_definitions = {}
+    for i, group in enumerate(groups_0, 1):
+        model_definitions[f"NonHal_Group_{i}"] = group
+    for i, group in enumerate(groups_1, 1):
+        model_definitions[f"Hal_Group_{i}"] = group
+
+    unique_features = sorted(list(set(f for group in groups_0 + groups_1 for f in group)))
+    for feature in unique_features:
+        model_name = f"Single_{shorten_species_name(feature).replace('. ', '_')}"
+        model_definitions[model_name] = [feature]
+
+    print(f"Total {len(model_definitions)} models are defined.")
+
+    # Step 5
+    feature_cols = [c for c in analysis_ready_df.columns if c.startswith("NGS_MAPPED_") or c.startswith("PCR_")]
+    X = analysis_ready_df[feature_cols]
+    y = analysis_ready_df['Halitosis']
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=RANDOM_STATE, stratify=y)
+
+    all_model_results = []
+    for name, features in model_definitions.items():
+        if not all(f in X.columns for f in features):
+            print(f"Skipping model {name}: one or more features not found in dataframe.")
+            continue
+
+        result = train_and_evaluate_model(name, features, X_train, y_train, X_test, y_test)
+        result['Model_Name'] = name
+        all_model_results.append(result)
+
+    # Step 6
+    results_df = pd.DataFrame(all_model_results).sort_values(by="AUROC", ascending=False).reset_index(drop=True)
+
+    pd.set_option('display.width', 1000)
+    print(results_df[['Model_Name', 'Num_Features', 'Accuracy(%)', 'AUROC', 'CV_AUROC', 'Features_Summary']].to_string(index=False, float_format="%.3f"))
+    final_csv_path = os.path.join(OUTPUT_DIR, "final_model_comparison_results.csv")
+    results_df.to_csv(final_csv_path, index=False)
