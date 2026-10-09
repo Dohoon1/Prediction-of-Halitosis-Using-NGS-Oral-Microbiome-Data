@@ -4,7 +4,6 @@ Code and data for the manuscript **“Salivary Microbiome-Based Classification o
 
 Raw 16S rRNA gene (V3–V4) sequencing reads are available from the NCBI Sequence Read Archive under BioProject **PRJNA1148754**. The correspondence between SRA runs and study participants is given in `data/sample_metadata.csv` (and in Supplementary Table 1 of the manuscript).
 
-Archived release: Zenodo, DOI 10.5281/zenodo.XXXXXXX (to be updated after the release is created).
 
 ## Repository structure
 
